@@ -1,0 +1,49 @@
+name: workflow-guard
+
+# PRの作成, 新規push, 再度openにする際に起動
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: workflow-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: workflow-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if protected paths are touched
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # 変更ファイル数の上限(API は3000件まで)を超えたら安全側で失敗
+          total=$(gh api "repos/$REPO/pulls/$PR" --jq '.changed_files')
+          if [ "$total" -ge 3000 ]; then
+            echo "::error::Too many changed files ($total). Failing closed."
+            exit 1
+          fi
+
+          # 変更・リネーム前・削除を含む全パスを取得(ページネーション対応)
+          # これがないと1ページ分(30件まで)のPRしか読まない
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > changed.txt
+
+          PATTERN='^(\.github/|\.coderabbit\.ya?ml$|(.*/)?wrangler\.[^/]*$|(.*/)?(AGENTS|CLAUDE|GEMINI)\.md$)'
+
+          if grep -Ei "$PATTERN" changed.txt | sed 's/^/  - /' > hits.txt && [ -s hits.txt ]; then
+            echo "::error::Protected paths changed. Admin bypass required."
+            cat hits.txt
+            exit 1
+          fi
+
+          echo "No protected paths changed."
