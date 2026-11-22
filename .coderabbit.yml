@@ -1,0 +1,6 @@
+reviews:
+  auto_review:
+    enabled: true
+    drafts: true
+    auto_incremental_review: true         # 追加コミットもレビューする
+    auto_pause_after_reviewed_commits: 3  # レビュー済みコミットが3回続いたら、一旦自動レビューを止める
