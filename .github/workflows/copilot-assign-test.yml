@@ -76,4 +76,41 @@ jobs:
               id
               issue(number:$number){ id }
               suggestedActors(capabilities:[CAN_BE_ASSIGNED], first:100){
-                nodes{
+                nodes{ __typename login ... on Bot{ id } ... on User{ id } }
+              }
+            }
+          }'
+
+          INFO=$(jq -n --arg q "$Q1" --arg o "$OWNER" --arg n "$NAME" --argjson num "$ISSUE_NUMBER" \
+            '{query:$q, variables:{owner:$o, name:$n, number:$num}}' \
+            | gh api graphql -H "$H" --input -)
+
+          REPO_ID=$(jq -r '.data.repository.id' <<<"$INFO")
+          ISSUE_ID=$(jq -r '.data.repository.issue.id' <<<"$INFO")
+          BOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id' <<<"$INFO")
+
+          for v in REPO_ID ISSUE_ID BOT_ID; do
+            if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
+              echo "::error::$v を取得できません"
+              jq '.errors // .' <<<"$INFO"
+              exit 1
+            fi
+          done
+
+          Q2='mutation($issue:ID!,$bot:ID!,$repo:ID!,$ci:String){
+            replaceActorsForAssignable(input:{
+              assignableId:$issue,
+              actorIds:[$bot],
+              agentAssignment:{ targetRepositoryId:$repo, baseRef:"main", customInstructions:$ci }
+            }){
+              assignable{ ... on Issue { number assignees(first:10){ nodes{ login } } } }
+            }
+          }'
+
+          RESP=$(jq -n --arg q "$Q2" --arg i "$ISSUE_ID" --arg b "$BOT_ID" --arg r "$REPO_ID" --arg ci "$CUSTOM_INSTRUCTIONS" \
+            '{query:$q, variables:{issue:$i, bot:$b, repo:$r, ci:$ci}}' \
+            | gh api graphql -H "$H" --input -)
+
+          jq . <<<"$RESP"
+          jq -e '(.errors // []) | length == 0' <<<"$RESP" >/dev/null \
+            || { echo "::error::GraphQL がエラーを返しました(上のレスポンスを確認)"; exit 1; }
