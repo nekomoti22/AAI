@@ -1,0 +1,79 @@
+name: copilot-assign-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "アサインする Issue 番号"
+        required: true
+        type: string
+      mode:
+        description: "API の種類"
+        required: true
+        type: choice
+        options:
+          - graphql
+          - rest
+        default: graphql
+      custom_instructions:
+        description: "Copilot への追加指示"
+        required: false
+        type: string
+        default: "PR の説明の先頭に、次の1行をそのまま入れてください: CI-MARKER-T5"
+
+permissions:
+  contents: read
+
+jobs:
+  assign:
+    if: github.actor == 'nekomoti22'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assign Copilot
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_PAT }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          MODE: ${{ inputs.mode }}
+          CUSTOM_INSTRUCTIONS: ${{ inputs.custom_instructions }}
+        run: |
+          set -euo pipefail
+
+          # 1. トークンが空でないか(Secret の登録漏れ・名前違いの検出)
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::COPILOT_PAT が空です(Secret の名前・登録を確認)"
+            exit 1
+          fi
+
+          # 2. トークンが有効か(期限切れなら 401 でここで止まる)。ユーザー名だけ表示
+          TOKEN_USER=$(gh api user --jq .login)
+          echo "token user: ${TOKEN_USER}"
+
+          # 3. どのモードで何を対象に動くかをログに残す
+          echo "mode=${MODE} issue=${ISSUE_NUMBER}"
+
+          [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::issue_number must be digits"; exit 1; }
+          OWNER="${REPO%%/*}"
+          NAME="${REPO##*/}"
+
+          if [ "$MODE" = "rest" ]; then
+            jq -n --arg repo "$REPO" --arg ci "$CUSTOM_INSTRUCTIONS" \
+              '{assignees: ["copilot-swe-agent[bot]"],
+                agent_assignment: {target_repo: $repo, base_branch: "main", custom_instructions: $ci}}' \
+            | gh api -X POST "repos/${REPO}/issues/${ISSUE_NUMBER}/assignees" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                --input - \
+            | jq '{number, state, assignees: [.assignees[].login]}'
+            exit 0
+          fi
+
+          H='GraphQL-Features: issues_copilot_assignment_api_support,coding_agent_model_selection'
+
+          Q1='query($owner:String!,$name:String!,$number:Int!){
+            repository(owner:$owner,name:$name){
+              id
+              issue(number:$number){ id }
+              suggestedActors(capabilities:[CAN_BE_ASSIGNED], first:100){
+                nodes{
